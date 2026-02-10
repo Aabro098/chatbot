@@ -30,7 +30,7 @@ def load_llm(huggingface_repo_id):
         repo_id=huggingface_repo_id,
         temperature=0.5,
         huggingfacehub_api_token=HF_TOKEN,
-        max_new_tokens=512
+        max_new_tokens=1024
     )
     # Wrap it in ChatHuggingFace for conversational format
     chat_llm = ChatHuggingFace(llm=llm)

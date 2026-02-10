@@ -15,7 +15,7 @@ load_dotenv(find_dotenv())
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="Chatbot API",
+    title="SkillBot API",
     description="API for querying documents using RAG with LLM",
     version="1.0.0"
 )
@@ -35,9 +35,9 @@ HUGGINGFACE_REPO_ID = "mistralai/Mistral-7B-Instruct-v0.2"
 def load_llm(huggingface_repo_id):
     llm = HuggingFaceEndpoint(
         repo_id=huggingface_repo_id,
-        temperature=0.5,
+        temperature=0.4,
         huggingfacehub_api_token=HF_TOKEN,
-        max_new_tokens=512
+        max_new_tokens=1024
     )
     chat_llm = ChatHuggingFace(llm=llm)
     return chat_llm
