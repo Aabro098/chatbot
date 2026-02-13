@@ -1,0 +1,24 @@
+[project]
+name = "ragbot"
+version = "0.1.0"
+description = "Your chatbot project"
+authors = ["Arbin Shrestha <youremail@example.com>"]
+requires-python = ">=3.10,<3.11"
+
+dependencies = [
+    "fastapi==0.128.4",
+    "uvicorn==0.40.0",
+    "langchain==1.2.3",
+    "langchain-huggingface==1.0.0",
+    "langchain-core==1.2.9",
+    "langchain-community==0.4",
+    "python-dotenv==1.2.1",
+    "pandas==2.3.3",
+    "numpy==2.2.5",
+    "faiss-cpu==1.13.2",
+    "sentence-transformers==5.2.0"
+]
+
+[build-system]
+requires = ["setuptools>=42", "wheel"]
+build-backend = "setuptools.build_meta"
