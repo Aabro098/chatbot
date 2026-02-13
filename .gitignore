@@ -3,3 +3,4 @@ vectorstore/
 __pycache__/
 data/
 skills_dataset.csv
+.DS_Store
