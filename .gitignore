@@ -1,3 +1,5 @@
 .env
 vectorstore/
 __pycache__/
+data/
+skills_dataset.csv
