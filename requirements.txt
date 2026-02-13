@@ -1,0 +1,11 @@
+fastapi
+uvicorn
+langchain
+langchain_huggingface
+langchain_core
+langchain_community
+python-dotenv
+pandas
+numpy
+faiss-cpu
+sentence-transformers
