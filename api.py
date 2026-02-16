@@ -1,3 +1,5 @@
+
+import openai
 import os
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
@@ -8,7 +10,6 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from dotenv import load_dotenv, find_dotenv
-import random
 import uvicorn
 from typing import List
 import pandas as pd
@@ -16,10 +17,9 @@ import numpy as np
 import faiss
 from sentence_transformers import SentenceTransformer
 
-
-
 # Load environment variables
 load_dotenv(find_dotenv())
+
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -54,6 +54,9 @@ model = SentenceTransformer("all-MiniLM-L6-v2")  # or "fine_tuned_sbert" if you 
 
 class SkillsRequest(BaseModel):
     user_skills: List[str]
+    user_requested_skills: List[str] = []
+    user_interactions: str = ""
+    description: str = ""
     top_k: int = 10
 
 def structured_score(row, similarity, match_score=0.0):
@@ -67,6 +70,50 @@ def structured_score(row, similarity, match_score=0.0):
         future_w * (row["future_relevance_score"] / 100) +
         match_w * match_score
     )
+
+
+# Setup OpenAI API key from environment
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+if OPENAI_API_KEY:
+    openai.api_key = OPENAI_API_KEY
+def openai_refine_skills(user_interactions, description, recommended_skills):
+    prompt = f"""
+You are an expert career advisor AI. Given the following user interactions, a user description, and a list of recommended skills, analyze and refine the skill recommendations. You may add, remove, or reorder skills to best fit the user's needs. Return ONLY a JSON array of skill names, no explanation or extra text.
+
+User Interactions:
+{user_interactions}
+
+Description:
+{description}
+
+Recommended Skills:
+{recommended_skills}
+"""
+    try:
+        response = openai.ChatCompletion.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "system", "content": "You are a helpful assistant."},
+                      {"role": "user", "content": prompt}],
+            max_tokens=512,
+            temperature=0.3
+        )
+        # Extract the JSON array from the response
+        import json
+        content = response["choices"][0]["message"]["content"]
+        # Try to parse the first JSON array found in the response
+        try:
+            skills = json.loads(content)
+        except Exception:
+            # Fallback: try to extract JSON array from text
+            import re
+            match = re.search(r'\[.*?\]', content, re.DOTALL)
+            if match:
+                skills = json.loads(match.group(0))
+            else:
+                skills = []
+        return skills
+    except Exception as e:
+        return recommended_skills
 
 def recommend_skills(user_skills, top_k=10):
     user_set = set([s.strip().lower() for s in user_skills if s.strip()])
@@ -101,10 +148,22 @@ def recommend_skills(user_skills, top_k=10):
     result = filtered_candidates.sort_values("final_score", ascending=False).drop_duplicates(subset=["skill_name"]).head(top_k).reset_index(drop=True)
     return result
 
+
 @app.post("/recommend")
 def recommend_skills_api(request: SkillsRequest):
-    result = recommend_skills(request.user_skills, top_k=request.top_k)
-    return {"recommended_skills": result["skill_name"].tolist()}
+    print("Received recommendation request: request body:", request.dict())
+    print(f"Received recommendation request with user skills: {request.user_skills} and requested skills: {request.user_requested_skills} , description: {request.description} and interactions: {request.user_interactions}")
+    combined_skills = list(set(request.user_skills + request.user_requested_skills))
+    # Get initial recommendations
+    result = recommend_skills(combined_skills, top_k=request.top_k)
+    recommended_skills = result["skill_name"].tolist()
+    # Refine with OpenAI
+    new_skills = openai_refine_skills(
+        user_interactions=request.user_interactions,
+        description=request.description,
+        recommended_skills=recommended_skills
+    )
+    return {"recommended_skills": new_skills}
 
 
 # Request and Response models
@@ -174,14 +233,12 @@ async def root():
     return {"message": "Chatbot API is running", "status": "healthy"}
 
 def is_greeting(text: str) -> bool:
-    """Check if the text contains greeting keywords"""
-    greetings_keywords = [
-        "hi", "hello", "hey", "greetings", "good morning", 
-        "good afternoon", "good evening", "what's up", "whats up",
-        "howdy", "hola", "namaste", "welcome"
-    ]
-    text_lower = text.lower().strip()
-    return any(greeting in text_lower for greeting in greetings_keywords)
+    greetings_keywords = {
+        "hi", "hello", "hey",
+        "good morning", "good afternoon", "good evening"
+    }
+    return text.lower().strip() in greetings_keywords
+
 
 def get_greeting_response(user_text: str) -> str:
     """Generate a greeting response based on user's greeting"""
