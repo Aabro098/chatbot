@@ -108,8 +108,14 @@ def load_chatbot_chain():
 
     retriever = db.as_retriever(search_kwargs={"k": RETRIEVAL_TOP_K})
     llm = load_llm(HF_MODEL_ID)
-    answer_chain = set_custom_prompt(CUSTOM_PROMPT_TEMPLATE) | llm | StrOutputParser()
-    compression_chain = set_custom_prompt(CONTEXT_COMPRESSION_PROMPT_TEMPLATE) | llm | StrOutputParser()
+    answer_chain = ChatPromptTemplate.from_messages([
+        ("system", "You are a helpful AI assistant specialized in technology skills, career development, and technical topics."),
+        ("human", CUSTOM_PROMPT_TEMPLATE),
+    ]) | llm | StrOutputParser()
+    compression_chain = ChatPromptTemplate.from_messages([
+        ("system", "You compress retrieved context for retrieval-augmented generation."),
+        ("human", CONTEXT_COMPRESSION_PROMPT_TEMPLATE),
+    ]) | llm | StrOutputParser()
     cross_encoder = CrossEncoder(RERANK_MODEL_ID)
 
     def truncate_text(text: str, limit: int) -> str:
