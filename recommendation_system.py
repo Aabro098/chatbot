@@ -1,4 +1,5 @@
 import os
+import re
 import pandas as pd
 import numpy as np
 import faiss
@@ -27,6 +28,7 @@ class SkillsRequest(BaseModel):
 # Setup Hugging Face hosted model
 HF_MODEL_ID = os.environ.get("HF_MODEL_ID", "mistralai/Mistral-7B-Instruct-v0.2")
 HF_TOKEN = os.environ.get("HF_TOKEN")
+SKILL_GRAPH = {}
 
 
 def load_llm(huggingface_repo_id):
@@ -47,6 +49,76 @@ def set_custom_prompt(custom_prompt_template):
     return ChatPromptTemplate.from_template(custom_prompt_template)
 
 
+def normalize_text(value):
+    """Normalize text for graph lookups"""
+    return re.sub(r"\s+", " ", str(value).strip().lower())
+
+
+def split_text_values(value):
+    """Split comma-separated text fields into cleaned skill tokens"""
+    if value is None or pd.isna(value):
+        return []
+    return [normalize_text(item) for item in str(value).split(",") if item and str(item).strip()]
+
+
+def build_skill_graph(df):
+    """Build a graph view of skills, prerequisites, dependencies, category, and industry tags"""
+    graph = {}
+
+    for _, row in df.iterrows():
+        skill_name = normalize_text(row.get("skill_name", ""))
+        if not skill_name:
+            continue
+
+        prerequisites = set(split_text_values(row.get("prerequisites_text", "")))
+        dependencies = set(split_text_values(row.get("complementary_text", "")))
+        industries = set(split_text_values(row.get("industry_text", "")))
+        category = normalize_text(row.get("category", ""))
+
+        graph[skill_name] = {
+            "prerequisites": prerequisites,
+            "dependencies": dependencies,
+            "category": category,
+            "industries": industries,
+        }
+
+    return graph
+
+
+def compute_graph_score(skill_name, user_skills):
+    """Calculate a graph-based score for a skill"""
+    skill_key = normalize_text(skill_name)
+    node = SKILL_GRAPH.get(skill_key, {})
+
+    user_set = {normalize_text(skill) for skill in user_skills if skill and str(skill).strip()}
+    user_nodes = [SKILL_GRAPH.get(skill, {}) for skill in user_set if skill in SKILL_GRAPH]
+    user_categories = {normalize_text(node.get("category", "")) for node in user_nodes if node.get("category")}
+    user_industries = set()
+    for node in user_nodes:
+        user_industries.update({normalize_text(industry) for industry in node.get("industries", set())})
+
+    components = []
+
+    prerequisites = node.get("prerequisites", set())
+    if prerequisites:
+        components.append(len(user_set & prerequisites) / len(prerequisites))
+
+    dependencies = node.get("dependencies", set())
+    if dependencies:
+        components.append(len(user_set & dependencies) / len(dependencies))
+
+    category = normalize_text(node.get("category", ""))
+    if category:
+        components.append(1.0 if category in user_categories else 0.0)
+
+    industries = {normalize_text(industry) for industry in node.get("industries", set())}
+    if industries:
+        overlap = len(user_industries & industries)
+        components.append(overlap / len(industries))
+
+    return float(np.mean(components)) if components else 0.0
+
+
 def filter_by_prerequisites(df, user_skills):
     """Filter skills based on user's prerequisite knowledge"""
     def prereq_ok(prereqs):
@@ -60,24 +132,28 @@ def filter_by_prerequisites(df, user_skills):
 
 def load_recommendation_models():
     """Load saved artifacts for recommendation system"""
+    global SKILL_GRAPH
     df = pd.read_pickle("skills_with_embeddings.pkl")
     embeddings = np.vstack(df["embedding"].values)
     index = faiss.read_index("skills.index")
     model = SentenceTransformer("all-MiniLM-L6-v2")
+    SKILL_GRAPH = build_skill_graph(df)
     return df, embeddings, index, model
 
 
-def structured_score(row, similarity, match_score=0.0):
+def structured_score(row, similarity, match_score=0.0, graph_score=0.0):
     """Calculate weighted score for skill recommendation"""
-    sim_w = 0.45
+    sim_w = 0.40
     demand_w = 0.15
     future_w = 0.15
-    match_w = 0.25
+    match_w = 0.20
+    graph_w = 0.10
     return (
         sim_w * similarity +
         demand_w * (row["job_demand_score"] / 100) +
         future_w * (row["future_relevance_score"] / 100) +
-        match_w * match_score
+        match_w * match_score +
+        graph_w * graph_score
     )
 
 
@@ -126,7 +202,7 @@ JSON Array:"""
         return recommended_skills
 
 
-def recommend_skills(df, index, embeddings, user_skills, top_k=10):
+def recommend_skills(df, index, embeddings, user_skills, top_k=10, description=""):
     """Generate skill recommendations based on user skills"""
     user_set = set([s.strip().lower() for s in user_skills if s.strip()])
     mask = df['skill_name'].fillna('').str.lower().isin(user_set)
@@ -134,7 +210,7 @@ def recommend_skills(df, index, embeddings, user_skills, top_k=10):
         user_query_emb = np.vstack(df.loc[mask, 'embedding'].values).mean(axis=0)
     else:
         user_query_emb = np.mean(embeddings, axis=0)
-    
+
     scores, indices = index.search(user_query_emb.reshape(1, -1), k=200)
     candidates = df.iloc[indices[0]].copy().reset_index(drop=True)
     candidates["similarity"] = scores[0]
@@ -155,9 +231,13 @@ def recommend_skills(df, index, embeddings, user_skills, top_k=10):
         0.3 * (candidates["prereq_overlap"] / denom) +
         0.1 * (candidates["comp_overlap"] / denom)
     )
+
+    candidates["graph_score"] = candidates["skill_name"].apply(
+        lambda skill: compute_graph_score(skill, user_skills)
+    )
     
     candidates["final_score"] = candidates.apply(
-        lambda r: structured_score(r, r["similarity"], r["match_score"]),
+        lambda r: structured_score(r, r["similarity"], r["match_score"], r["graph_score"]),
         axis=1
     )
     

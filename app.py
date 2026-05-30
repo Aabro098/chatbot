@@ -76,7 +76,14 @@ async def recommend_skills_api(request: SkillsRequest):
         combined_skills = list(set(request.user_skills + request.user_requested_skills))
         
         # Get initial recommendations
-        result = recommend_skills_func(df, index, embeddings, combined_skills, top_k=request.top_k)
+        result = recommend_skills_func(
+            df,
+            index,
+            embeddings,
+            combined_skills,
+            top_k=request.top_k,
+            description=request.description,
+        )
         recommended_skills = result["skill_name"].tolist()
         
         # Refine with hosted LLM if description or interactions are provided

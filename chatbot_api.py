@@ -3,10 +3,10 @@ import random
 from pydantic import BaseModel
 from langchain_huggingface import ChatHuggingFace, HuggingFaceEndpoint
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
+from sentence_transformers import CrossEncoder
 from dotenv import load_dotenv, find_dotenv
 
 # Load environment variables
@@ -25,6 +25,12 @@ class QueryResponse(BaseModel):
 # Setup Hugging Face hosted model
 HF_MODEL_ID = os.environ.get("HF_MODEL_ID", "mistralai/Mistral-7B-Instruct-v0.2")
 HF_TOKEN = os.environ.get("HF_TOKEN")
+RETRIEVAL_TOP_K = int(os.environ.get("RETRIEVAL_TOP_K", 8))
+FINAL_CONTEXT_TOP_K = max(3, min(5, int(os.environ.get("FINAL_CONTEXT_TOP_K", 4))))
+RERANK_SNIPPET_CHARS = int(os.environ.get("RERANK_SNIPPET_CHARS", 350))
+CONTEXT_SNIPPET_CHARS = int(os.environ.get("CONTEXT_SNIPPET_CHARS", 800))
+CONTEXT_COMPRESSION_MAX_CHARS = int(os.environ.get("CONTEXT_COMPRESSION_MAX_CHARS", 1200))
+RERANK_MODEL_ID = os.environ.get("RERANK_MODEL_ID", "cross-encoder/ms-marco-MiniLM-L-6-v2")
 
 # Custom prompt template
 CUSTOM_PROMPT_TEMPLATE = """
@@ -52,6 +58,25 @@ Guidelines:
 - Start the answer directly without small talk or greetings
 """
 
+CONTEXT_COMPRESSION_PROMPT_TEMPLATE = """
+You are compressing retrieved context for a retrieval-augmented generation system.
+
+Question: {question}
+
+Context chunks:
+{context}
+
+Task:
+- Compress the context into a short, question-focused summary.
+- Keep only facts that help answer the question.
+- Remove repetition, filler, and unrelated details.
+- Preserve technical terms and important entities.
+- Output at most {max_chars} characters.
+- Use compact bullet points if helpful.
+- Do not add any commentary or preamble.
+
+Compressed context:
+"""
 
 def load_llm(huggingface_repo_id):
     """Load the Hugging Face chat model"""
@@ -72,8 +97,7 @@ def set_custom_prompt(custom_prompt_template):
 
 
 def load_chatbot_chain():
-    """Initialize the QA chain for chatbot"""
-    # Load FAISS database
+    """Initialize the QA pipeline for chatbot"""
     DB_FAISS_PATH = "vectorstore/db_faiss"
     embedding_model = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
 
@@ -82,19 +106,57 @@ def load_chatbot_chain():
     except Exception as e:
         raise RuntimeError(f"Failed to load FAISS database: {e}")
 
-    retriever = db.as_retriever(search_kwargs={"k": 3})
+    retriever = db.as_retriever(search_kwargs={"k": RETRIEVAL_TOP_K})
+    llm = load_llm(HF_MODEL_ID)
+    answer_chain = set_custom_prompt(CUSTOM_PROMPT_TEMPLATE) | llm | StrOutputParser()
+    compression_chain = set_custom_prompt(CONTEXT_COMPRESSION_PROMPT_TEMPLATE) | llm | StrOutputParser()
+    cross_encoder = CrossEncoder(RERANK_MODEL_ID)
 
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
+    def truncate_text(text: str, limit: int) -> str:
+        normalized = " ".join(text.split())
+        return normalized[:limit]
 
-    qa_chain = (
-        {"context": retriever | RunnableLambda(format_docs), "question": RunnablePassthrough()}
-        | set_custom_prompt(CUSTOM_PROMPT_TEMPLATE)
-        | load_llm(HF_MODEL_ID)
-        | StrOutputParser()
-    )
+    def format_doc_for_rerank(doc, index: int) -> str:
+        source = doc.metadata.get("source", "") if hasattr(doc, "metadata") else ""
+        prefix = f"Chunk {index}"
+        if source:
+            prefix += f" | Source: {source}"
+        return f"{prefix}\n{truncate_text(doc.page_content, RERANK_SNIPPET_CHARS)}"
 
-    return qa_chain
+    def format_doc_for_context(doc) -> str:
+        source = doc.metadata.get("source", "") if hasattr(doc, "metadata") else ""
+        prefix = f"Source: {source}\n" if source else ""
+        return f"{prefix}{truncate_text(doc.page_content, CONTEXT_SNIPPET_CHARS)}"
+
+    def rerank_documents(question: str, docs):
+        if len(docs) <= FINAL_CONTEXT_TOP_K:
+            return docs[:FINAL_CONTEXT_TOP_K]
+
+        pairs = [(question, doc.page_content) for doc in docs]
+        scores = cross_encoder.predict(pairs)
+        ranked_indices = sorted(range(len(docs)), key=lambda i: scores[i], reverse=True)
+        selected_docs = [docs[index] for index in ranked_indices[:FINAL_CONTEXT_TOP_K]]
+
+        if not selected_docs:
+            return docs[:FINAL_CONTEXT_TOP_K]
+
+        return selected_docs
+
+    def answer_question(question: str) -> str:
+        retrieved_docs = retriever.invoke(question)
+        selected_docs = rerank_documents(question, retrieved_docs)
+        raw_context = "\n\n".join(format_doc_for_context(doc) for doc in selected_docs)
+        context = compression_chain.invoke(
+            {
+                "question": question,
+                "context": raw_context,
+                "max_chars": CONTEXT_COMPRESSION_MAX_CHARS,
+            }
+        )
+        context = context[:CONTEXT_COMPRESSION_MAX_CHARS]
+        return answer_chain.invoke({"context": context, "question": question})
+
+    return answer_question
 
 
 def is_greeting(text: str) -> bool:
@@ -126,4 +188,4 @@ def process_query(query_text: str) -> str:
     if is_greeting(query_text):
         return get_greeting_response(query_text)
     else:
-        return qa_chain.invoke(query_text)
+        return qa_chain(query_text)
